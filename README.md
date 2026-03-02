@@ -28,18 +28,6 @@ Hybrid Retrieval (Vector + BM25) · Cross-Encoder Rerank · Multi-Scope Isolatio
 
 ---
 
-## ⭐ Star History
-
-<a href="https://star-history.com/#win4r/memory-lancedb-pro&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date" />
-  </picture>
-</a>
-
----
-
 ## Why This Plugin?
 
 The built-in `memory-lancedb` plugin in OpenClaw provides basic vector search. **memory-lancedb-pro** takes it much further:
@@ -731,6 +719,16 @@ upgrade to **memory-lancedb-pro >= 1.0.14**. This plugin now coerces these value
 | `@sinclair/typebox` 0.34.48 | JSON Schema type definitions (tool parameters) |
 
 ---
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#win4r/memory-lancedb-pro&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=win4r/memory-lancedb-pro&type=Date" />
+  </picture>
+</a>
 
 ## Contributors
 
