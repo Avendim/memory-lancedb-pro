@@ -2,7 +2,7 @@
   "id": "memory-lancedb-pro",
   "name": "Memory (LanceDB Pro)",
   "description": "Enhanced LanceDB-backed long-term memory with hybrid retrieval, multi-scope isolation, long-context chunking, and management CLI",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "kind": "memory",
   "configSchema": {
     "type": "object",
@@ -18,8 +18,18 @@
           },
           "apiKey": {
             "oneOf": [
-              { "type": "string" },
-              { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              }
             ],
             "description": "Single API key or array of keys for round-robin rotation"
           },

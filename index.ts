@@ -743,11 +743,22 @@ function parsePluginConfig(value: unknown): PluginConfig {
   }
 
   // Accept single key (string) or array of keys for round-robin rotation
-  const apiKey: string | string[] = typeof embedding.apiKey === "string"
-    ? embedding.apiKey
-    : Array.isArray(embedding.apiKey) && embedding.apiKey.length > 0 && embedding.apiKey.every((k: unknown) => typeof k === "string")
-      ? (embedding.apiKey as string[])
-      : process.env.OPENAI_API_KEY || "";
+  let apiKey: string | string[];
+  if (typeof embedding.apiKey === "string") {
+    apiKey = embedding.apiKey;
+  } else if (Array.isArray(embedding.apiKey) && embedding.apiKey.length > 0) {
+    // Validate every element is a non-empty string
+    const invalid = embedding.apiKey.findIndex((k: unknown) => typeof k !== "string" || (k as string).trim().length === 0);
+    if (invalid !== -1) {
+      throw new Error(`embedding.apiKey[${invalid}] is invalid: expected non-empty string`);
+    }
+    apiKey = embedding.apiKey as string[];
+  } else if (embedding.apiKey !== undefined) {
+    // apiKey is present but wrong type — throw, don't silently fall back
+    throw new Error("embedding.apiKey must be a string or non-empty array of strings");
+  } else {
+    apiKey = process.env.OPENAI_API_KEY || "";
+  }
 
   if (!apiKey || (Array.isArray(apiKey) && apiKey.length === 0)) {
     throw new Error("embedding.apiKey is required (set directly or via OPENAI_API_KEY env var)");

@@ -208,14 +208,28 @@ export class Embedder {
     return client;
   }
 
-  /** Check whether an error is a rate-limit / quota-exceeded error. */
+  /** Check whether an error is a rate-limit / quota-exceeded / overload error. */
   private isRateLimitError(error: unknown): boolean {
-    // OpenAI SDK typed error
-    if (error && typeof error === "object" && "status" in error && (error as any).status === 429) {
-      return true;
+    if (!error || typeof error !== "object") return false;
+
+    const err = error as Record<string, any>;
+
+    // HTTP status: 429 (rate limit) or 503 (service overload)
+    if (err.status === 429 || err.status === 503) return true;
+
+    // OpenAI SDK structured error code
+    if (err.code === "rate_limit_exceeded" || err.code === "insufficient_quota") return true;
+
+    // Nested error object (some providers)
+    const nested = err.error;
+    if (nested && typeof nested === "object") {
+      if (nested.type === "rate_limit_exceeded" || nested.type === "insufficient_quota") return true;
+      if (nested.code === "rate_limit_exceeded" || nested.code === "insufficient_quota") return true;
     }
+
+    // Fallback: message text matching
     const msg = error instanceof Error ? error.message : String(error);
-    return /rate.limit|quota|too many requests|insufficient.*credit|429/i.test(msg);
+    return /rate.limit|quota|too many requests|insufficient.*credit|429|503.*overload/i.test(msg);
   }
 
   /**
@@ -231,19 +245,27 @@ export class Embedder {
       try {
         return await client.embeddings.create(payload);
       } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
         if (this.isRateLimitError(error) && attempt < maxAttempts - 1) {
           console.log(
-            `[memory-lancedb-pro] API key ${attempt + 1}/${maxAttempts} hit rate limit, rotating to next key...`
+            `[memory-lancedb-pro] Attempt ${attempt + 1}/${maxAttempts} hit rate limit, rotating to next key...`
           );
-          lastError = error instanceof Error ? error : new Error(String(error));
           continue;
         }
-        // Non-rate-limit error or last attempt — let caller handle
-        throw error;
+
+        // Non-rate-limit error → don't retry, let caller handle (e.g. chunking)
+        if (!this.isRateLimitError(error)) {
+          throw error;
+        }
       }
     }
 
-    throw lastError || new Error("All API keys exhausted (rate limited)");
+    // All keys exhausted with rate-limit errors
+    throw new Error(
+      `All ${maxAttempts} API keys exhausted (rate limited). Last error: ${lastError?.message || "unknown"}`,
+      { cause: lastError }
+    );
   }
 
   /** Number of API keys in the rotation pool. */
