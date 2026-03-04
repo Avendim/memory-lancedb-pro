@@ -17,6 +17,7 @@ import { createRetriever, DEFAULT_RETRIEVAL_CONFIG } from "./src/retriever.js";
 import { createScopeManager } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
+import { ensureSelfImprovementLearningFiles } from "./src/self-improvement-files.js";
 import { shouldSkipRetrieval } from "./src/adaptive-retrieval.js";
 import { AccessTracker } from "./src/access-tracker.js";
 import { createMemoryCLI } from "./cli.js";
@@ -78,6 +79,7 @@ interface PluginConfig {
     enabled?: boolean;
     storeToLanceDB?: boolean;
     injectMode?: ReflectionInjectMode;
+    agentId?: string;
     messageCount?: number;
     maxInputChars?: number;
     timeoutMs?: number;
@@ -152,21 +154,6 @@ const DEFAULT_REFLECTION_DEDUPE_ERROR_SIGNALS = true;
 const DEFAULT_REFLECTION_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS = 200;
 const DEFAULT_REFLECTION_ERROR_SCAN_MAX_CHARS = 8_000;
-const DEFAULT_LEARNINGS_TEMPLATE = `# Learnings
-
-Append structured entries:
-- LRN-YYYYMMDD-XXX for corrections / best practices / knowledge gaps
-- Include summary, details, suggested action, metadata, and status`;
-const DEFAULT_ERRORS_TEMPLATE = `# Errors
-
-Append structured entries:
-- ERR-YYYYMMDD-XXX for command/tool/integration failures
-- Include symptom, context, probable cause, and prevention`;
-const DEFAULT_FEATURE_REQUESTS_TEMPLATE = `# Feature Requests
-
-Append structured entries:
-- FEAT-YYYYMMDD-XXX for missing capabilities
-- Include requested behavior, user context, and suggested implementation`;
 
 type ReflectionErrorSignal = {
   at: number;
@@ -198,30 +185,17 @@ async function loadSelfImprovementReminderContent(workspaceDir?: string): Promis
   }
 }
 
-async function ensureSelfImprovementFiles(workspaceDir: string): Promise<void> {
-  const learningsDir = join(workspaceDir, ".learnings");
-  await mkdir(learningsDir, { recursive: true });
-
-  const ensureFile = async (filePath: string, content: string) => {
-    try {
-      const existing = await readFile(filePath, "utf-8");
-      if (existing.trim().length > 0) return;
-    } catch {
-      // write default below
-    }
-    await writeFile(filePath, `${content.trim()}\n`, "utf-8");
-  };
-
-  await ensureFile(join(learningsDir, "LEARNINGS.md"), DEFAULT_LEARNINGS_TEMPLATE);
-  await ensureFile(join(learningsDir, "ERRORS.md"), DEFAULT_ERRORS_TEMPLATE);
-  await ensureFile(join(learningsDir, "FEATURE_REQUESTS.md"), DEFAULT_FEATURE_REQUESTS_TEMPLATE);
-}
-
 function parseAgentIdFromSessionKey(sessionKey: string | undefined): string | undefined {
   const sk = (sessionKey ?? "").trim();
   const parts = sk.split(":");
   if (parts.length >= 2 && parts[0] === "agent" && parts[1]) return parts[1];
   return undefined;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : undefined;
 }
 
 function isInternalReflectionSessionKey(sessionKey: unknown): boolean {
@@ -665,70 +639,6 @@ function sanitizeForContext(text: string): string {
 // Session Path Helpers
 // ============================================================================
 
-async function readSessionMessages(
-  filePath: string,
-  messageCount: number,
-): Promise<string | null> {
-  try {
-    const lines = (await readFile(filePath, "utf-8")).trim().split("\n");
-    const messages: string[] = [];
-
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry.type === "message" && entry.message) {
-          const msg = entry.message;
-          const role = msg.role;
-          if ((role === "user" || role === "assistant") && msg.content) {
-            const text = Array.isArray(msg.content)
-              ? msg.content.find((c: any) => c.type === "text")?.text
-              : msg.content;
-            if (
-              text &&
-              !text.startsWith("/") &&
-              !text.includes("<relevant-memories>")
-            ) {
-              messages.push(`${role}: ${text}`);
-            }
-          }
-        }
-      } catch {}
-    }
-
-    if (messages.length === 0) return null;
-    return messages.slice(-messageCount).join("\n");
-  } catch {
-    return null;
-  }
-}
-
-async function readSessionContentWithResetFallback(
-  sessionFilePath: string,
-  messageCount = 15,
-): Promise<string | null> {
-  const primary = await readSessionMessages(sessionFilePath, messageCount);
-  if (primary) return primary;
-
-  // If /new already rotated the file, try .reset.* siblings
-  try {
-    const dir = dirname(sessionFilePath);
-    const resetPrefix = `${basename(sessionFilePath)}.reset.`;
-    const files = await readdir(dir);
-    const resetCandidates = files
-      .filter((name) => name.startsWith(resetPrefix))
-      .sort();
-
-    if (resetCandidates.length > 0) {
-      const latestResetPath = join(
-        dir,
-        resetCandidates[resetCandidates.length - 1],
-      );
-      return await readSessionMessages(latestResetPath, messageCount);
-    }
-  } catch {}
-
-  return primary;
-}
 function stripResetSuffix(fileName: string): string {
   const resetIndex = fileName.indexOf(".reset.");
   return resetIndex === -1 ? fileName : fileName.slice(0, resetIndex);
@@ -795,6 +705,8 @@ function getPluginVersion(): string {
     return "unknown";
   }
 }
+
+const pluginVersion = getPluginVersion();
 
 // ============================================================================
 // Plugin Definition
@@ -1301,116 +1213,6 @@ const memoryLanceDBProPlugin = {
     }
 
     // ========================================================================
-    // Session Memory Hook (replaces built-in session-memory)
-    // ========================================================================
-
-    if (config.sessionMemory?.enabled === true) {
-      // DISABLED by default (2026-07-09): session summaries stored in LanceDB pollute
-      // retrieval quality. OpenClaw already saves .jsonl files to ~/.openclaw/agents/*/sessions/
-      // and memorySearch.sources: ["memory", "sessions"] can search them directly.
-      // Set sessionMemory.enabled: true in plugin config to re-enable.
-      const sessionMessageCount = config.sessionMemory?.messageCount ?? 15;
-
-      api.registerHook("command:new", async (event) => {
-        try {
-          api.logger.debug("session-memory: hook triggered for /new command");
-
-          const context = (event.context || {}) as Record<string, unknown>;
-          const sessionEntry = (context.previousSessionEntry ||
-            context.sessionEntry ||
-            {}) as Record<string, unknown>;
-          const currentSessionId = sessionEntry.sessionId as string | undefined;
-          let currentSessionFile =
-            (sessionEntry.sessionFile as string) || undefined;
-          const source = (context.commandSource as string) || "unknown";
-
-          // Resolve session file (handle reset rotation)
-          if (!currentSessionFile || currentSessionFile.includes(".reset.")) {
-            const searchDirs = new Set<string>();
-            if (currentSessionFile) searchDirs.add(dirname(currentSessionFile));
-
-            const workspaceDir = context.workspaceDir as string | undefined;
-            if (workspaceDir) searchDirs.add(join(workspaceDir, "sessions"));
-
-            for (const sessionsDir of searchDirs) {
-              const recovered = await findPreviousSessionFile(
-                sessionsDir,
-                currentSessionFile,
-                currentSessionId,
-              );
-              if (recovered) {
-                currentSessionFile = recovered;
-                api.logger.debug(
-                  `session-memory: recovered session file: ${recovered}`,
-                );
-                break;
-              }
-            }
-          }
-
-          if (!currentSessionFile) {
-            api.logger.debug("session-memory: no session file found, skipping");
-            return;
-          }
-
-          // Read session content
-          const sessionContent = await readSessionContentWithResetFallback(
-            currentSessionFile,
-            sessionMessageCount,
-          );
-          if (!sessionContent) {
-            api.logger.debug(
-              "session-memory: no session content found, skipping",
-            );
-            return;
-          }
-
-          // Format as memory entry
-          const now = new Date(event.timestamp);
-          const dateStr = now.toISOString().split("T")[0];
-          const timeStr = now.toISOString().split("T")[1].split(".")[0];
-
-          const memoryText = [
-            `Session: ${dateStr} ${timeStr} UTC`,
-            `Session Key: ${event.sessionKey}`,
-            `Session ID: ${currentSessionId || "unknown"}`,
-            `Source: ${source}`,
-            "",
-            "Conversation Summary:",
-            sessionContent,
-          ].join("\n");
-
-          // Embed and store
-          const vector = await embedder.embedPassage(memoryText);
-          await store.store({
-            text: memoryText,
-            vector,
-            category: "fact",
-            scope: "global",
-            importance: 0.5,
-            metadata: JSON.stringify({
-              type: "session-summary",
-              sessionKey: event.sessionKey,
-              sessionId: currentSessionId || "unknown",
-              date: dateStr,
-            }),
-          });
-
-          api.logger.info(
-            `session-memory: stored session summary for ${currentSessionId || "unknown"}`,
-          );
-        } catch (err) {
-          api.logger.warn(`session-memory: failed to save: ${String(err)}`);
-        }
-      }, {
-        name: "memory-lancedb-pro.session-memory.command-new",
-        description: "Store session summary in LanceDB on /new",
-      });
-
-      api.logger.info("session-memory: hook registered for command:new");
-    }
-
-    // ========================================================================
     // Integrated Self-Improvement (inheritance + derived)
     // ========================================================================
 
@@ -1432,7 +1234,7 @@ const memoryLanceDBProPlugin = {
           }
 
           if (config.selfImprovement?.ensureLearningFiles !== false) {
-            await ensureSelfImprovementFiles(workspaceDir);
+            await ensureSelfImprovementLearningFiles(workspaceDir);
           }
 
           const bootstrapFiles = context.bootstrapFiles;
@@ -1507,6 +1309,7 @@ const memoryLanceDBProPlugin = {
       const reflectionMaxInputChars = config.memoryReflection?.maxInputChars ?? DEFAULT_REFLECTION_MAX_INPUT_CHARS;
       const reflectionTimeoutMs = config.memoryReflection?.timeoutMs ?? DEFAULT_REFLECTION_TIMEOUT_MS;
       const reflectionThinkLevel = config.memoryReflection?.thinkLevel ?? DEFAULT_REFLECTION_THINK_LEVEL;
+      const reflectionAgentId = asNonEmptyString(config.memoryReflection?.agentId);
       const reflectionErrorReminderMaxEntries =
         parsePositiveInt(config.memoryReflection?.errorReminderMaxEntries) ?? DEFAULT_REFLECTION_ERROR_REMINDER_MAX_ENTRIES;
       const reflectionDedupeErrorSignals = config.memoryReflection?.dedupeErrorSignals !== false;
@@ -1668,8 +1471,9 @@ const memoryLanceDBProPlugin = {
           const dateStr = now.toISOString().split("T")[0];
           const timeHms = now.toISOString().split("T")[1].split(".")[0];
           const timeCompact = timeHms.replace(/:/g, "");
-          const agentId = parseAgentIdFromSessionKey(sessionKey) || "main";
-          const targetScope = scopeManager.getDefaultScope(agentId);
+          const sourceAgentId = parseAgentIdFromSessionKey(sessionKey) || "main";
+          const reflectionRunAgentId = reflectionAgentId || sourceAgentId;
+          const targetScope = scopeManager.getDefaultScope(sourceAgentId);
           const toolErrorSignals = sessionKey
             ? (reflectionErrorStateBySession.get(sessionKey)?.entries ?? []).slice(-reflectionErrorReminderMaxEntries)
             : [];
@@ -1678,7 +1482,7 @@ const memoryLanceDBProPlugin = {
             conversation,
             maxInputChars: reflectionMaxInputChars,
             cfg,
-            agentId,
+            agentId: reflectionRunAgentId,
             workspaceDir,
             timeoutMs: reflectionTimeoutMs,
             thinkLevel: reflectionThinkLevel,
@@ -1708,7 +1512,7 @@ const memoryLanceDBProPlugin = {
               reflectionText,
               sessionKey,
               sessionId: currentSessionId || "unknown",
-              agentId,
+              agentId: sourceAgentId,
               command: String(event.action || "unknown"),
               scope: targetScope,
               toolErrorSignals,
@@ -1721,7 +1525,7 @@ const memoryLanceDBProPlugin = {
               });
             }
             for (const cacheKey of reflectionByAgentCache.keys()) {
-              if (cacheKey.startsWith(`${agentId}::`)) reflectionByAgentCache.delete(cacheKey);
+              if (cacheKey.startsWith(`${sourceAgentId}::`)) reflectionByAgentCache.delete(cacheKey);
             }
           }
 
@@ -2033,6 +1837,7 @@ function parsePluginConfig(value: unknown): PluginConfig {
         enabled: sessionStrategy === "memoryReflection",
         storeToLanceDB: reflectionStoreToLanceDB,
         injectMode: reflectionInjectMode,
+        agentId: asNonEmptyString(memoryReflectionRaw.agentId),
         messageCount: reflectionMessageCount,
         maxInputChars: parsePositiveInt(memoryReflectionRaw.maxInputChars) ?? DEFAULT_REFLECTION_MAX_INPUT_CHARS,
         timeoutMs: parsePositiveInt(memoryReflectionRaw.timeoutMs) ?? DEFAULT_REFLECTION_TIMEOUT_MS,
@@ -2048,6 +1853,7 @@ function parsePluginConfig(value: unknown): PluginConfig {
         enabled: sessionStrategy === "memoryReflection",
         storeToLanceDB: reflectionStoreToLanceDB,
         injectMode: "inheritance+derived",
+        agentId: undefined,
         messageCount: reflectionMessageCount,
         maxInputChars: DEFAULT_REFLECTION_MAX_INPUT_CHARS,
         timeoutMs: DEFAULT_REFLECTION_TIMEOUT_MS,

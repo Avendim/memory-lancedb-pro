@@ -88,7 +88,7 @@ OpenClaw 内置的 `memory-lancedb` 插件仅提供基本的向量搜索。**mem
 | `src/embedder.ts` | Embedding 抽象层。兼容 OpenAI API 的任意 Provider（OpenAI、Gemini、Jina、Ollama 等），支持 task-aware embedding（`taskQuery`/`taskPassage`） |
 | `src/retriever.ts` | 混合检索引擎。Vector + BM25 → RRF 融合 → Jina Cross-Encoder Rerank → Recency Boost → Importance Weight → Length Norm → Time Decay → Hard Min Score → Noise Filter → MMR Diversity |
 | `src/scopes.ts` | 多 Scope 访问控制。支持 `global`、`agent:<id>`、`custom:<name>`、`project:<id>`、`user:<id>` 等 Scope 模式 |
-| `src/tools.ts` | Agent 工具定义：`memory_recall`、`memory_store`、`memory_forget`（核心）+ `memory_stats`、`memory_list`（管理） |
+| `src/tools.ts` | Agent 工具定义：`memory_recall`、`memory_store`、`memory_forget`（核心）、`self_improvement_log`（默认）+ `self_improvement_review`、`self_improvement_extract_skill`（管理模式） |
 | `src/noise-filter.ts` | 噪声过滤器。过滤 Agent 拒绝回复、Meta 问题、寒暄等低质量记忆 |
 | `src/adaptive-retrieval.ts` | 自适应检索。判断 query 是否需要触发记忆检索（跳过问候、命令、简单确认等） |
 | `src/migrate.ts` | 迁移工具。从旧版 `memory-lancedb` 插件迁移数据到 Pro 版 |
@@ -146,39 +146,35 @@ Query → BM25 FTS ─────┘
 - 过滤 Meta 问题（"do you remember"）
 - 过滤寒暄（"hi"、"hello"、"HEARTBEAT"）
 
-### 7. 会话策略 + 集成模块
+### 7. Session 策略
 
-- **集成 self-improvement 模块**：
-  - `agent:bootstrap`：注入 `SELF_IMPROVEMENT_REMINDER.md`（虚拟文件）
-  - `command:new` / `command:reset`：在会话重置前注入简短 `/note` 提醒
-  - 治理基线：自动确保 `.learnings/LEARNINGS.md`、`.learnings/ERRORS.md`、`.learnings/FEATURE_REQUESTS.md` 存在
-- **集成 memory-reflection 模块（核心闭环）**：
-  - **Reflect**：`command:new` / `command:reset` 基于最近 Session JSONL 生成高信号反思
-  - **Store**：默认把反思产物写入 LanceDB（`memoryReflection.storeToLanceDB`）
-  - **Inherit**：`before_agent_start` 注入 `<inherited-rules>`（稳定规则）
-  - **Derive**：`before_prompt_build` 注入 `<derived-focus>`（执行增量）和 `<error-detected>`
-  - 落盘：写入 `workspace/memory/reflections/YYYY-MM-DD/HHMMSS.md`，并在 `workspace/memory/YYYY-MM-DD.md` 追加索引
-- **会话策略开关**：
-  - `sessionStrategy: "memoryReflection"`（默认）：使用插件的 memory-reflection hooks
-  - `sessionStrategy: "systemSessionMemory"`：关闭插件反思 hooks，改用 OpenClaw 内置 `session-memory`
-  - `sessionStrategy: "none"`：禁用本插件的会话策略 hooks
-- 兼容说明：`sessionMemory.enabled=true|false` 映射为 `sessionStrategy="systemSessionMemory"|"none"`
+- `sessionStrategy: "memoryReflection"`（默认）：使用插件的 memory-reflection hooks
+- `sessionStrategy: "systemSessionMemory"`：关闭插件反思 hooks，改用 OpenClaw 内置 `session-memory`
+- `sessionStrategy: "none"`：禁用本插件的会话策略 hooks
+- 兼容说明：`sessionMemory.enabled=true|false` 映射为 `systemSessionMemory|none`
 
 ### 8. Self-Improvement
 
 - 触发事件：`agent:bootstrap`、`command:new`、`command:reset`
-- `agent:bootstrap`：注入 `SELF_IMPROVEMENT_REMINDER.md` 虚拟文件
-- `command:new` / `command:reset`：追加简短 `/note self-improvement ...` 提醒
-- 配置项：
-  - `selfImprovement.enabled`（默认：`true`）
-  - `selfImprovement.beforeResetNote`
-  - `selfImprovement.skipSubagentBootstrap`
-  - `selfImprovement.ensureLearningFiles`
-- 高价值核心工具：
+- `agent:bootstrap`：注入 `SELF_IMPROVEMENT_REMINDER.md` 到 bootstrap 上下文
+- `command:new` / `command:reset`：在会话重置前注入简短 `/note self-improvement ...` 提醒
+- 文件：确保 `.learnings/LEARNINGS.md`、`.learnings/ERRORS.md`、`.learnings/FEATURE_REQUESTS.md` 存在
+- 工具：
   - `self_improvement_log`：写入结构化 LRN/ERR/FEAT 条目
-- 治理型工具（`self_improvement_review`、`self_improvement_extract_skill`）建议仅在管理模式使用。
+  - `self_improvement_review`：汇总治理 backlog（pending/high/promoted）
+  - `self_improvement_extract_skill`：从学习条目提炼可复用 `SKILL.md` 脚手架
 
-### 9. 自动捕获 & 自动回忆
+### 9. memoryReflection
+
+- Reflect：`command:new` / `command:reset` 基于最近 Session JSONL 生成反思
+- Store：反思文件写入 `memory/reflections/YYYY-MM-DD/HHMMSS.md`
+- Store（可选）：将反思切片写入 LanceDB（`memoryReflection.storeToLanceDB`）
+- 独立代理（可选）：通过 `memoryReflection.agentId` 指定用于反思生成的代理（例如 `memory-distiller`）
+- Inherit：`before_agent_start` 注入 `<inherited-rules>`（稳定规则）
+- Derive：`before_prompt_build` 注入 `<derived-focus>` 与 `<error-detected>`
+- 错误闭环：`after_tool_call` 捕获并去重工具错误签名，用于提醒与反思上下文
+
+### 10. 自动捕获 & 自动回忆
 
 - **Auto-Capture**（`agent_end` hook）: 从对话中提取 preference/fact/decision/entity，去重后存储（每次最多 3 条）
   - 触发词支持 **简体中文 + 繁體中文**（例如：记住/記住、偏好/喜好/喜歡、决定/決定 等）
@@ -382,11 +378,7 @@ openclaw config get plugins.slots.memory
     "maxHalfLifeMultiplier": 3
   },
   "enableManagementTools": false,
-  "sessionStrategy": "none",
-  "selfImprovement": {
-    "enabled": false,
-    "ensureLearningFiles": true
-  },
+  "sessionStrategy": "memoryReflection",
   "scopes": {
     "default": "global",
     "definitions": {
@@ -397,9 +389,16 @@ openclaw config get plugins.slots.memory
       "discord-bot": ["global", "agent:discord-bot"]
     }
   },
+  "selfImprovement": {
+    "enabled": true,
+    "beforeResetNote": true,
+    "skipSubagentBootstrap": true,
+    "ensureLearningFiles": true
+  },
   "memoryReflection": {
     "storeToLanceDB": true,
     "injectMode": "inheritance+derived",
+    "agentId": "memory-distiller",
     "messageCount": 120,
     "maxInputChars": 24000,
     "timeoutMs": 20000,
@@ -476,7 +475,7 @@ Legacy 方案：本插件也提供一个安全的 extractor 脚本 `scripts/json
 - Cursor：`~/.openclaw/state/jsonl-distill/cursor.json`
 - Batches：`~/.openclaw/state/jsonl-distill/batches/`
 
-> 脚本只读 session JSONL，不会修改原始日志。
+> 脚本只读 session JSONL，不会修改原始日志。默认会跳过 `*.reset.*` 快照与 slash 命令/控制注记行（例如 `/note self-improvement ...`）。
 
 ### （可选）启用 Agent 来源白名单（提高信噪比）
 

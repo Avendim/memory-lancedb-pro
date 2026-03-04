@@ -13,6 +13,7 @@ import type { MemoryStore } from "./store.js";
 import { isNoise } from "./noise-filter.js";
 import type { MemoryScopeManager } from "./scopes.js";
 import type { Embedder } from "./embedder.js";
+import { ensureSelfImprovementLearningFiles } from "./self-improvement-files.js";
 
 // ============================================================================
 // Types
@@ -105,22 +106,6 @@ async function withFileWriteQueue<T>(filePath: string, action: () => Promise<T>)
   }
 }
 
-async function ensureLearningFiles(baseDir: string): Promise<void> {
-  const learningsDir = join(baseDir, ".learnings");
-  await mkdir(learningsDir, { recursive: true });
-  const files = ["LEARNINGS.md", "ERRORS.md", "FEATURE_REQUESTS.md"] as const;
-  for (const f of files) {
-    const p = join(learningsDir, f);
-    try {
-      const existing = await readFile(p, "utf-8");
-      if (existing.trim().length > 0) continue;
-    } catch {
-      // write below
-    }
-    await writeFile(p, `# ${f.replace(".md", "")}\n\n`, "utf-8");
-  }
-}
-
 async function nextLearningId(filePath: string, prefix: "LRN" | "ERR" | "FEAT"): Promise<string> {
   const date = todayYmd();
   let count = 0;
@@ -169,7 +154,7 @@ export function registerSelfImprovementLogTool(api: OpenClawPluginApi, context: 
         };
         try {
           const workspaceDir = resolveWorkspaceDir(toolCtx, context.workspaceDir);
-          await ensureLearningFiles(workspaceDir);
+          await ensureSelfImprovementLearningFiles(workspaceDir);
           const learningsDir = join(workspaceDir, ".learnings");
           const fileName = type === "learning" ? "LEARNINGS.md" : type === "error" ? "ERRORS.md" : "FEATURE_REQUESTS.md";
           const filePath = join(learningsDir, fileName);
@@ -256,7 +241,7 @@ export function registerSelfImprovementExtractSkillTool(api: OpenClawPluginApi, 
           }
 
           const workspaceDir = resolveWorkspaceDir(toolCtx, context.workspaceDir);
-          await ensureLearningFiles(workspaceDir);
+          await ensureSelfImprovementLearningFiles(workspaceDir);
           const learningsPath = join(workspaceDir, ".learnings", sourceFile);
           const learningBody = await readFile(learningsPath, "utf-8");
           const escapedLearningId = escapeRegExp(learningId.trim());
@@ -271,7 +256,6 @@ export function registerSelfImprovementExtractSkillTool(api: OpenClawPluginApi, 
 
           const summaryMatch = match[0].match(/### Summary\n([\s\S]*?)\n###/m);
           const summary = (summaryMatch?.[1] ?? "Summarize the source learning here.").trim();
-
           const safeOutputDir = outputDir.replace(/^\/+/, "").replace(/\.\./g, "");
           const skillDir = join(workspaceDir, safeOutputDir || "skills", skillName);
           await mkdir(skillDir, { recursive: true });
@@ -348,7 +332,7 @@ export function registerSelfImprovementReviewTool(api: OpenClawPluginApi, contex
       async execute() {
         try {
           const workspaceDir = resolveWorkspaceDir(toolCtx, context.workspaceDir);
-          await ensureLearningFiles(workspaceDir);
+          await ensureSelfImprovementLearningFiles(workspaceDir);
           const learningsDir = join(workspaceDir, ".learnings");
           const files = ["LEARNINGS.md", "ERRORS.md", "FEATURE_REQUESTS.md"] as const;
           const stats = { pending: 0, high: 0, promoted: 0, total: 0 };
@@ -1226,7 +1210,7 @@ export function registerAllMemoryTools(
   options: {
     enableManagementTools?: boolean;
     enableSelfImprovementTools?: boolean;
-  } = {}
+  } = {},
 ) {
   // Core tools (always enabled)
   registerMemoryRecallTool(api, context);
@@ -1242,7 +1226,6 @@ export function registerAllMemoryTools(
   if (options.enableSelfImprovementTools !== false) {
     registerSelfImprovementLogTool(api, context);
     if (options.enableManagementTools) {
-      // Keep governance-heavy tools in management mode to avoid core-path bloat.
       registerSelfImprovementExtractSkillTool(api, context);
       registerSelfImprovementReviewTool(api, context);
     }

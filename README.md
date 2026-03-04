@@ -88,7 +88,7 @@ The built-in `memory-lancedb` plugin in OpenClaw provides basic vector search. *
 | `src/embedder.ts` | Embedding abstraction. Compatible with any OpenAI-API provider (OpenAI, Gemini, Jina, Ollama, etc.). Supports task-aware embedding (`taskQuery`/`taskPassage`) |
 | `src/retriever.ts` | Hybrid retrieval engine. Vector + BM25 → RRF fusion → Jina Cross-Encoder Rerank → Recency Boost → Importance Weight → Length Norm → Time Decay → Hard Min Score → Noise Filter → MMR Diversity |
 | `src/scopes.ts` | Multi-scope access control. Supports `global`, `agent:<id>`, `custom:<name>`, `project:<id>`, `user:<id>` |
-| `src/tools.ts` | Agent tool definitions: `memory_recall`, `memory_store`, `memory_forget` (core) + `memory_stats`, `memory_list` (management) |
+| `src/tools.ts` | Agent tool definitions: `memory_recall`, `memory_store`, `memory_forget` (core), `self_improvement_log` (default), and governance tools `self_improvement_review` / `self_improvement_extract_skill` (management mode) |
 | `src/noise-filter.ts` | Noise filter. Filters out agent refusals, meta-questions, greetings, and low-quality content |
 | `src/adaptive-retrieval.ts` | Adaptive retrieval. Determines whether a query needs memory retrieval (skips greetings, slash commands, simple confirmations, emoji) |
 | `src/migrate.ts` | Migration tool. Migrates data from the built-in `memory-lancedb` plugin to Pro |
@@ -146,42 +146,35 @@ Filters out low-quality content at both auto-capture and tool-store stages:
 - Meta-questions ("do you remember")
 - Greetings ("hi", "hello", "HEARTBEAT")
 
-### 7. Session Strategy + Integrated Modules
+### 7. Session Strategy
 
-- Core loop: **Reflect -> Store -> Inherit -> Derive -> Apply**
-- **Reflect** (`command:new` / `command:reset`):
-  - build high-signal reflection from recent session JSONL
-  - write markdown to `workspace/memory/reflections/YYYY-MM-DD/HHMMSS.md`
-  - append one pointer line into `workspace/memory/YYYY-MM-DD.md`
-- **Store**:
-  - persist reflection artifacts into LanceDB (default enabled via `memoryReflection.storeToLanceDB`)
-  - store structured metadata (`invariants`, `derived`, `errorSignals`) for retrieval reuse
-- **Inherit** (`before_agent_start`):
-  - inject stable rules from recent reflection memories as `<inherited-rules>`
-- **Derive** (`before_prompt_build`):
-  - inject latest execution deltas and open loops as `<derived-focus>`
-  - inject recent tool failures as `<error-detected>`
-- **Session strategy switch**:
-  - `sessionStrategy: "memoryReflection"` (default): use plugin reflection loop
-  - `sessionStrategy: "systemSessionMemory"`: disable plugin reflection hooks and rely on OpenClaw built-in `session-memory`
-  - `sessionStrategy: "none"`: disable plugin session strategy hooks
-- Legacy compatibility: `sessionMemory.enabled=true|false` maps to `sessionStrategy="systemSessionMemory"|"none"`
+- `sessionStrategy: "memoryReflection"` (default): use plugin reflection hooks
+- `sessionStrategy: "systemSessionMemory"`: disable plugin reflection hooks; use OpenClaw built-in `session-memory`
+- `sessionStrategy: "none"`: disable plugin session strategy hooks
+- Compatibility: legacy `sessionMemory.enabled=true|false` maps to `systemSessionMemory|none`
 
 ### 8. Self-Improvement
 
-- Triggered by `agent:bootstrap`, `command:new`, and `command:reset`
-- `agent:bootstrap`: injects `SELF_IMPROVEMENT_REMINDER.md` as a virtual file
-- `command:new` / `command:reset`: appends a short `/note self-improvement ...` reminder
-- Config keys:
-  - `selfImprovement.enabled` (default: `true`)
-  - `selfImprovement.beforeResetNote`
-  - `selfImprovement.skipSubagentBootstrap`
-  - `selfImprovement.ensureLearningFiles`
-- High-value core tool:
+- Hooks: `agent:bootstrap`, `command:new`, `command:reset`
+- `agent:bootstrap`: injects `SELF_IMPROVEMENT_REMINDER.md` into bootstrap context
+- `command:new` / `command:reset`: appends a short `/note self-improvement ...` reminder before reset
+- Files: ensures `.learnings/LEARNINGS.md`, `.learnings/ERRORS.md`, `.learnings/FEATURE_REQUESTS.md`
+- Tools:
   - `self_improvement_log`: write structured LRN/ERR/FEAT entries
-- Governance-heavy tools (`self_improvement_review`, `self_improvement_extract_skill`) are available in management mode.
+  - `self_improvement_review`: summarize governance backlog (pending/high/promoted)
+  - `self_improvement_extract_skill`: extract a reusable `SKILL.md` scaffold from a learning entry
 
-### 9. Auto-Capture & Auto-Recall
+### 9. memoryReflection
+
+- Reflect: `command:new` / `command:reset` generate reflection from recent session JSONL
+- Store: writes markdown reflection files under `memory/reflections/YYYY-MM-DD/HHMMSS.md`
+- Store (optional): persists reflection slices to LanceDB (`memoryReflection.storeToLanceDB`)
+- Dedicated agent (optional): run reflection generation with another agent via `memoryReflection.agentId` (e.g. `memory-distiller`)
+- Inherit: `before_agent_start` injects `<inherited-rules>` from reflection invariants
+- Derive: `before_prompt_build` injects `<derived-focus>` and `<error-detected>` blocks
+- Error loop: `after_tool_call` captures and deduplicates tool error signatures for reminder/reflection context
+
+### 10. Auto-Capture & Auto-Recall
 
 - **Auto-Capture** (`agent_end` hook): Extracts preference/fact/decision/entity from conversations, deduplicates, stores up to 3 per turn
   - Skips memory-management prompts (e.g. delete/forget/cleanup memory entries) to reduce noise
@@ -219,32 +212,6 @@ Add a line to your agent system prompt, e.g.:
 ---
 
 ## Installation
-
-### Enable integrated modules safely (recommended)
-
-If migrating from workspace hooks, keep only one execution path:
-
-1) Keep plugin integrated modules enabled (`selfImprovement.enabled=true`, `sessionStrategy="memoryReflection"`)
-2) Disable old workspace hooks with the same names
-3) Disable OpenClaw bundled `session-memory` to avoid overlap/noise
-
-Example:
-
-```bash
-# Disable bundled hook (important when using plugin-integrated reflection flow)
-openclaw hooks disable session-memory
-
-# Disable legacy workspace hooks after migration
-openclaw hooks disable self-improvement
-openclaw hooks disable memory-reflection
-
-# Ensure plugin is enabled
-openclaw config set plugins.entries.memory-lancedb-pro.enabled true
-
-# Restart gateway after plugin TS/config changes
-rm -rf /tmp/jiti/
-openclaw gateway restart
-```
 
 ### AI-safe install notes (anti-hallucination)
 
@@ -413,11 +380,7 @@ openclaw config get plugins.slots.memory
     "maxHalfLifeMultiplier": 3
   },
   "enableManagementTools": false,
-  "sessionStrategy": "none",
-  "selfImprovement": {
-    "enabled": false,
-    "ensureLearningFiles": true
-  },
+  "sessionStrategy": "memoryReflection",
   "scopes": {
     "default": "global",
     "definitions": {
@@ -428,9 +391,16 @@ openclaw config get plugins.slots.memory
       "discord-bot": ["global", "agent:discord-bot"]
     }
   },
+  "selfImprovement": {
+    "enabled": true,
+    "beforeResetNote": true,
+    "skipSubagentBootstrap": true,
+    "ensureLearningFiles": true
+  },
   "memoryReflection": {
     "storeToLanceDB": true,
     "injectMode": "inheritance+derived",
+    "agentId": "memory-distiller",
     "messageCount": 120,
     "maxInputChars": 24000,
     "timeoutMs": 20000,
@@ -585,7 +555,7 @@ and keeps a cursor here:
 
 The script is **safe**: it never modifies session logs.
 
-By default it skips historical reset snapshots (`*.reset.*`) and excludes the distiller agent itself (`memory-distiller`) to prevent self-ingestion loops.
+By default it skips historical reset snapshots (`*.reset.*`), slash-command/control-note lines (for example `/note self-improvement ...`), and excludes the distiller agent itself (`memory-distiller`) to prevent self-ingestion loops.
 
 ### Optional: restrict distillation sources (allowlist)
 
