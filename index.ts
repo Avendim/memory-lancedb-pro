@@ -186,6 +186,7 @@ const DEFAULT_REFLECTION_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_REFLECTION_MAX_TRACKED_SESSIONS = 200;
 const DEFAULT_REFLECTION_ERROR_SCAN_MAX_CHARS = 8_000;
 const REFLECTION_FALLBACK_MARKER = "(fallback) Reflection generation failed; storing minimal pointer only.";
+const DIAG_BUILD_TAG = "memory-lancedb-pro-diag-20260308-0058";
 
 type ReflectionErrorSignal = {
   at: number;
@@ -269,6 +270,25 @@ function clipDiagnostic(text: string, maxLen = 400): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= maxLen) return oneLine;
   return `${oneLine.slice(0, maxLen - 3)}...`;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 
 function tryParseJsonObject(raw: string): Record<string, unknown> | null {
@@ -876,24 +896,29 @@ async function generateReflectionText(params: {
         const runEmbeddedPiAgent = await loadEmbeddedPiRunner();
         const modelRef = resolveAgentPrimaryModelRef(params.cfg, params.agentId);
         const { provider, model } = modelRef ? splitProviderModel(modelRef) : {};
+        const embeddedTimeoutMs = Math.max(params.timeoutMs + 5000, 15000);
 
-        return await runEmbeddedPiAgent({
-          sessionId: `reflection-${Date.now()}`,
-          sessionKey: "temp:memory-reflection",
-          agentId: params.agentId,
-          sessionFile: tempSessionFile,
-          workspaceDir: params.workspaceDir,
-          config: params.cfg,
-          prompt,
-          disableTools: true,
-          disableMessageTool: true,
-          timeoutMs: params.timeoutMs,
-          runId: `memory-reflection-${Date.now()}`,
-          bootstrapContextMode: "lightweight",
-          thinkLevel: params.thinkLevel,
-          provider,
-          model,
-        });
+        return await withTimeout(
+          runEmbeddedPiAgent({
+            sessionId: `reflection-${Date.now()}`,
+            sessionKey: "temp:memory-reflection",
+            agentId: params.agentId,
+            sessionFile: tempSessionFile,
+            workspaceDir: params.workspaceDir,
+            config: params.cfg,
+            prompt,
+            disableTools: true,
+            disableMessageTool: true,
+            timeoutMs: params.timeoutMs,
+            runId: `memory-reflection-${Date.now()}`,
+            bootstrapContextMode: "lightweight",
+            thinkLevel: params.thinkLevel,
+            provider,
+            model,
+          }),
+          embeddedTimeoutMs,
+          "embedded reflection run"
+        );
       },
     });
 
@@ -1417,6 +1442,7 @@ const memoryLanceDBProPlugin = {
     api.logger.info(
       `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"})`,
     );
+    api.logger.info(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
     // ========================================================================
     // Markdown Mirror
@@ -1720,10 +1746,27 @@ const memoryLanceDBProPlugin = {
       if (config.selfImprovement?.beforeResetNote !== false) {
         const appendSelfImprovementNote = async (event: any) => {
           try {
-            if (!Array.isArray(event.messages)) return;
+            const action = String(event?.action || "unknown");
+            const sessionKeyForLog = typeof event?.sessionKey === "string" ? event.sessionKey : "";
+            const contextForLog = (event?.context && typeof event.context === "object")
+              ? (event.context as Record<string, unknown>)
+              : {};
+            const commandSource = typeof contextForLog.commandSource === "string" ? contextForLog.commandSource : "";
+            const contextKeys = Object.keys(contextForLog).slice(0, 8).join(",");
+            api.logger.info(
+              `self-improvement: command:${action} hook start; sessionKey=${sessionKeyForLog || "(none)"}; source=${commandSource || "(unknown)"}; hasMessages=${Array.isArray(event?.messages)}; contextKeys=${contextKeys || "(none)"}`
+            );
+
+            if (!Array.isArray(event.messages)) {
+              api.logger.warn(`self-improvement: command:${action} missing event.messages array; skip note inject`);
+              return;
+            }
 
             const exists = event.messages.some((m: unknown) => typeof m === "string" && m.includes(SELF_IMPROVEMENT_NOTE_PREFIX));
-            if (exists) return;
+            if (exists) {
+              api.logger.info(`self-improvement: command:${action} note already present; skip duplicate inject`);
+              return;
+            }
 
             event.messages.push(
               [
@@ -1735,6 +1778,9 @@ const memoryLanceDBProPlugin = {
                 "- If reusable across tasks, extract a new skill from the learning.",
                 "- Then proceed with the new session.",
               ].join("\n")
+            );
+            api.logger.info(
+              `self-improvement: command:${action} injected note; messages=${event.messages.length}`
             );
           } catch (err) {
             api.logger.warn(`self-improvement: note inject failed: ${String(err)}`);
@@ -1906,15 +1952,23 @@ const memoryLanceDBProPlugin = {
         const sessionKey = typeof event.sessionKey === "string" ? event.sessionKey : "";
         try {
           pruneReflectionSessionState();
+          const action = String(event?.action || "unknown");
           const context = (event.context || {}) as Record<string, unknown>;
           const cfg = context.cfg;
           const workspaceDir = resolveWorkspaceDirFromContext(context);
-          if (!cfg) return;
+          if (!cfg) {
+            api.logger.warn(`memory-reflection: command:${action} missing cfg in hook context; skip reflection`);
+            return;
+          }
 
           const sessionEntry = (context.previousSessionEntry || context.sessionEntry || {}) as Record<string, unknown>;
           const currentSessionId = typeof sessionEntry.sessionId === "string" ? sessionEntry.sessionId : "unknown";
           let currentSessionFile = typeof sessionEntry.sessionFile === "string" ? sessionEntry.sessionFile : undefined;
           const sourceAgentId = parseAgentIdFromSessionKey(sessionKey) || "main";
+          const commandSource = typeof context.commandSource === "string" ? context.commandSource : "";
+          api.logger.info(
+            `memory-reflection: command:${action} hook start; sessionKey=${sessionKey || "(none)"}; source=${commandSource || "(unknown)"}; sessionId=${currentSessionId}; sessionFile=${currentSessionFile || "(none)"}`
+          );
 
           if (!currentSessionFile || currentSessionFile.includes(".reset.")) {
             const searchDirs = resolveReflectionSessionSearchDirs({
@@ -1924,19 +1978,42 @@ const memoryLanceDBProPlugin = {
               currentSessionFile,
               sourceAgentId,
             });
+            api.logger.info(
+              `memory-reflection: command:${action} session recovery start for session ${currentSessionId}; initial=${currentSessionFile || "(none)"}; dirs=${searchDirs.join(" | ") || "(none)"}`
+            );
             for (const sessionsDir of searchDirs) {
               const recovered = await findPreviousSessionFile(sessionsDir, currentSessionFile, currentSessionId);
               if (recovered) {
+                api.logger.info(
+                  `memory-reflection: command:${action} recovered session file ${recovered} from ${sessionsDir}`
+                );
                 currentSessionFile = recovered;
                 break;
               }
             }
           }
 
-          if (!currentSessionFile) return;
+          if (!currentSessionFile) {
+            const searchDirs = resolveReflectionSessionSearchDirs({
+              context,
+              cfg,
+              workspaceDir,
+              currentSessionFile,
+              sourceAgentId,
+            });
+            api.logger.warn(
+              `memory-reflection: command:${action} missing session file after recovery for session ${currentSessionId}; dirs=${searchDirs.join(" | ") || "(none)"}`
+            );
+            return;
+          }
 
           const conversation = await readSessionConversationWithResetFallback(currentSessionFile, reflectionMessageCount);
-          if (!conversation) return;
+          if (!conversation) {
+            api.logger.warn(
+              `memory-reflection: command:${action} conversation empty/unusable for session ${currentSessionId}; file=${currentSessionFile}`
+            );
+            return;
+          }
 
           const now = new Date(typeof event.timestamp === "number" ? event.timestamp : Date.now());
           const nowTs = now.getTime();
@@ -1950,6 +2027,9 @@ const memoryLanceDBProPlugin = {
             ? (reflectionErrorStateBySession.get(sessionKey)?.entries ?? []).slice(-reflectionErrorReminderMaxEntries)
             : [];
 
+          api.logger.info(
+            `memory-reflection: command:${action} reflection generation start for session ${currentSessionId}; timeoutMs=${reflectionTimeoutMs}`
+          );
           const reflectionGenerated = await generateReflectionText({
             conversation,
             maxInputChars: reflectionMaxInputChars,
@@ -1961,6 +2041,9 @@ const memoryLanceDBProPlugin = {
             toolErrorSignals,
             logger: api.logger,
           });
+          api.logger.info(
+            `memory-reflection: command:${action} reflection generation done for session ${currentSessionId}; runner=${reflectionGenerated.runner}; usedFallback=${reflectionGenerated.usedFallback ? "yes" : "no"}`
+          );
           const reflectionText = reflectionGenerated.text;
           if (reflectionGenerated.runner === "cli") {
             api.logger.warn(
