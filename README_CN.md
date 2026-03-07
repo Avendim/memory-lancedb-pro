@@ -95,7 +95,7 @@ npm i memory-lancedb-pro@1.1.0-beta.1
         "model": "gpt-4o-mini",
         "baseURL": "https://api.openai.com/v1"
       },
-      "extractMinMessages": 4,
+      "extractMinMessages": 2,
       "extractMaxChars": 8000
     }
   }
@@ -108,7 +108,7 @@ npm i memory-lancedb-pro@1.1.0-beta.1
 | `llm.apiKey` | *(embedding apiKey)* | 提取 LLM 的 API key |
 | `llm.model` | `gpt-4o-mini` | 提取和去重使用的 LLM 模型 |
 | `llm.baseURL` | *(embedding baseURL)* | LLM API 的 Base URL |
-| `extractMinMessages` | `4` | 触发提取的最少对话消息数 |
+| `extractMinMessages` | `2` | 触发提取的最少对话消息数 |
 | `extractMaxChars` | `8000` | 处理提取的最大对话字符数 |
 
 ### 新增文件
@@ -592,7 +592,7 @@ openclaw config get plugins.slots.memory
     "model": "openai/gpt-oss-120b",
     "baseURL": "https://api.openai.com/v1"
   },
-  "extractMinMessages": 4,
+  "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
 ```
@@ -704,7 +704,7 @@ OpenClaw 默认行为补充：
 | `llm.apiKey` | string | *（默认复用 `embedding.apiKey`）* | LLM 提供商 API Key |
 | `llm.model` | string | `openai/gpt-oss-120b` | LLM 模型名称 |
 | `llm.baseURL` | string | *（默认复用 `embedding.baseURL`）* | LLM API 端点 |
-| `extractMinMessages` | number | `4` | 触发提取所需的最少消息数 |
+| `extractMinMessages` | number | `2` | 触发提取所需的最少消息数 |
 | `extractMaxChars` | number | `8000` | 发送给 LLM 提取的最大字符数 |
 
 <details>
@@ -737,7 +737,7 @@ OpenClaw 默认行为补充：
     "model": "openai/gpt-oss-120b",
     "baseURL": "https://api.openai.com/v1"
   },
-  "extractMinMessages": 4,
+  "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
 ```

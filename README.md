@@ -95,7 +95,7 @@ Smart extraction is **enabled by default**. It reuses your existing embedding AP
         "model": "gpt-4o-mini",
         "baseURL": "https://api.openai.com/v1"
       },
-      "extractMinMessages": 4,
+      "extractMinMessages": 2,
       "extractMaxChars": 8000
     }
   }
@@ -108,7 +108,7 @@ Smart extraction is **enabled by default**. It reuses your existing embedding AP
 | `llm.apiKey` | *(embedding apiKey)* | API key for extraction LLM |
 | `llm.model` | `gpt-4o-mini` | LLM model for extraction & dedup |
 | `llm.baseURL` | *(embedding baseURL)* | Base URL for LLM API |
-| `extractMinMessages` | `4` | Min conversation messages before extraction triggers |
+| `extractMinMessages` | `2` | Min conversation messages before extraction triggers |
 | `extractMaxChars` | `8000` | Max conversation chars to process |
 
 ### New Files
@@ -591,7 +591,7 @@ openclaw config get plugins.slots.memory
     "model": "openai/gpt-oss-120b",
     "baseURL": "https://api.openai.com/v1"
   },
-  "extractMinMessages": 4,
+  "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
 ```
@@ -703,7 +703,7 @@ When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to i
 | `llm.apiKey` | string | *(falls back to `embedding.apiKey`)* | API key for the LLM provider |
 | `llm.model` | string | `openai/gpt-oss-120b` | LLM model name |
 | `llm.baseURL` | string | *(falls back to `embedding.baseURL`)* | LLM API endpoint |
-| `extractMinMessages` | number | `4` | Minimum messages in a conversation before extraction triggers |
+| `extractMinMessages` | number | `2` | Minimum messages in a conversation before extraction triggers |
 | `extractMaxChars` | number | `8000` | Maximum characters sent to the LLM for extraction |
 
 <details>
@@ -736,7 +736,7 @@ When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to i
     "model": "openai/gpt-oss-120b",
     "baseURL": "https://api.openai.com/v1"
   },
-  "extractMinMessages": 4,
+  "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
 ```
