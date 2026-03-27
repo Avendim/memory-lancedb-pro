@@ -605,8 +605,8 @@ export function registerMemoryRecallTool(
               const categoryTag = getDisplayCategoryTag(r.entry);
               const metadata = parseSmartMetadata(r.entry.metadata, r.entry);
               const base = includeFullText
-                ? r.entry.text
-                : metadata.l0_abstract || r.entry.text;
+                ? (metadata.l2_content || metadata.l1_overview || r.entry.text)
+                : (metadata.l0_abstract || r.entry.text);
               const inline = normalizeInlineText(base);
               const rendered = includeFullText
                 ? inline
@@ -614,6 +614,15 @@ export function registerMemoryRecallTool(
               return `${i + 1}. [${r.entry.id}] [${categoryTag}] ${rendered}`;
             })
             .join("\n");
+
+          const serializedMemories = sanitizeMemoryForSerialization(results);
+          if (includeFullText) {
+            for (let i = 0; i < results.length; i++) {
+              const metadata = parseSmartMetadata(results[i].entry.metadata, results[i].entry);
+              (serializedMemories[i] as Record<string, unknown>).fullText =
+                metadata.l2_content || metadata.l1_overview || results[i].entry.text;
+            }
+          }
 
           return {
             content: [
@@ -624,7 +633,7 @@ export function registerMemoryRecallTool(
             ],
             details: {
               count: results.length,
-              memories: sanitizeMemoryForSerialization(results),
+              memories: serializedMemories,
               query,
               scopes: scopeFilter,
               retrievalMode: runtimeContext.retriever.getConfig().mode,

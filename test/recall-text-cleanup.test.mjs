@@ -426,6 +426,126 @@ describe("recall text cleanup", () => {
     assert.doesNotMatch(lines[0], /…$/, "full text mode should not force preview truncation");
   });
 
+  it("includeFullText=true renders L2 content in output, not L0 abstract", async () => {
+    const l0 = "short L0 abstract";
+    const l2 = "Full L2 narrative: the user resolved a concurrent-write conflict by adding proper-lockfile as a write guard around all LanceDB mutation calls. Prevention: always acquire the lock before any store.add / store.update call.";
+
+    const results = [
+      {
+        entry: {
+          id: "case-1",
+          text: l0,
+          category: "fact",
+          scope: "global",
+          importance: 0.85,
+          timestamp: Date.now(),
+          metadata: stringifySmartMetadata(
+            buildSmartMetadata(
+              { text: l0, category: "fact", importance: 0.85 },
+              {
+                l0_abstract: l0,
+                l1_overview: "## Conflict\n- LanceDB concurrent write resolved via proper-lockfile",
+                l2_content: l2,
+                memory_category: "cases",
+                fact_key: "cases:lancedb-write-conflict",
+              },
+            ),
+          ),
+        },
+        score: 0.95,
+        sources: { vector: { score: 0.95, rank: 1 } },
+      },
+    ];
+
+    // default (summary) mode should show L0
+    const toolSummary = createTool(registerMemoryRecallTool, makeRecallContext(results));
+    const resSummary = await toolSummary.execute(null, { query: "lancedb conflict" });
+    const summaryLines = extractRenderedMemoryRecallLines(resSummary.content[0].text);
+    assert.equal(summaryLines.length, 1);
+    assert.match(summaryLines[0], new RegExp(l0.slice(0, 20)));
+    assert.doesNotMatch(summaryLines[0], /Full L2 narrative/);
+
+    // includeFullText=true should show L2 in rendered output
+    const toolFull = createTool(registerMemoryRecallTool, makeRecallContext(results));
+    const resFull = await toolFull.execute(null, { query: "lancedb conflict", includeFullText: true });
+    const fullLines = extractRenderedMemoryRecallLines(resFull.content[0].text);
+    assert.equal(fullLines.length, 1);
+    assert.match(fullLines[0], /Full L2 narrative/, "rendered line should contain L2 content");
+    assert.doesNotMatch(fullLines[0], new RegExp(`^.*\\[case-1\\].*${l0.slice(0, 15)}`), "rendered line should not be the L0 abstract");
+
+    // details.memories[].fullText should carry L2
+    assert.equal(resFull.details.memories[0].fullText, l2, "details.memories[0].fullText should be L2 content");
+    // details.memories[].text still carries L0 for backwards compatibility
+    assert.equal(resFull.details.memories[0].text, l0, "details.memories[0].text should still be L0 for compatibility");
+  });
+
+  it("includeFullText=false does not expose fullText in details.memories", async () => {
+    const l0 = "short L0 abstract";
+    const l2 = "Full L2 narrative that should not appear when includeFullText is false.";
+
+    const results = [
+      {
+        entry: {
+          id: "case-2",
+          text: l0,
+          category: "fact",
+          scope: "global",
+          importance: 0.85,
+          timestamp: Date.now(),
+          metadata: stringifySmartMetadata(
+            buildSmartMetadata(
+              { text: l0, category: "fact", importance: 0.85 },
+              {
+                l0_abstract: l0,
+                l1_overview: "## Overview\n- some overview",
+                l2_content: l2,
+                memory_category: "cases",
+                fact_key: "cases:opt-in-check",
+              },
+            ),
+          ),
+        },
+        score: 0.9,
+        sources: { vector: { score: 0.9, rank: 1 } },
+      },
+    ];
+
+    const tool = createTool(registerMemoryRecallTool, makeRecallContext(results));
+    const res = await tool.execute(null, { query: "opt-in check" });
+
+    assert.equal(res.details.memories[0].fullText, undefined, "fullText should be absent when includeFullText=false");
+    assert.equal(res.details.memories[0].text, l0, "text should still carry L0");
+  });
+
+  it("includeFullText=true falls back to entry.text for legacy memories without smart metadata", async () => {
+    const legacyText = "legacy memory with no smart metadata at all";
+
+    const results = [
+      {
+        entry: {
+          id: "legacy-1",
+          text: legacyText,
+          category: "fact",
+          scope: "global",
+          importance: 0.6,
+          timestamp: Date.now(),
+          // no metadata field — simulates pre-smart-extraction records
+        },
+        score: 0.75,
+        sources: { vector: { score: 0.75, rank: 1 } },
+      },
+    ];
+
+    const tool = createTool(registerMemoryRecallTool, makeRecallContext(results));
+    const res = await tool.execute(null, { query: "legacy fallback", includeFullText: true });
+    const lines = extractRenderedMemoryRecallLines(res.content[0].text);
+
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /legacy memory with no smart metadata/, "should render entry.text as fallback for legacy memories");
+    assert.equal(res.details.memories[0].fullText, legacyText, "details.memories[0].fullText should fall back to entry.text");
+  });
+
+
   it("applies auto-recall item/char budgets before injecting context", async () => {
     MemoryRetriever.prototype.retrieve = async () => makeManyResults(5);
 
